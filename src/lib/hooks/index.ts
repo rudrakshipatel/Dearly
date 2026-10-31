@@ -1,28 +1,66 @@
 "use client";
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { authService } from "../services";
-import { mediaStore } from "../services/media";
+import { useCallback, useSyncExternalStore } from "react";
+import { useResolvedSrc } from "../media/resolver";
+import { authService, type Me } from "../services";
+import { supabaseBrowser } from "../supabase/client";
 import type { User } from "../types";
 
-let cachedUserRaw: string | null = null;
-let cachedUser: User | null = null;
+/* ------------------------------------------------------------------ session store */
 
-function getUserSnapshot() {
-  const raw = typeof window === "undefined" ? null : window.localStorage.getItem("dearly:session");
-  if (raw !== cachedUserRaw) {
-    cachedUserRaw = raw;
-    try {
-      cachedUser = raw ? (JSON.parse(raw) as User) : null;
-    } catch {
-      cachedUser = null;
-    }
+type SessionState = { status: "loading" | "ready"; user: User | null; me: Me | null };
+let state: SessionState = { status: "loading", user: null, me: null };
+const subs = new Set<() => void>();
+let started = false;
+
+function set(next: SessionState) {
+  state = next;
+  subs.forEach((s) => s());
+}
+
+async function loadMe() {
+  try {
+    const me = await authService.me();
+    set({
+      status: "ready",
+      me,
+      user: { id: me.user.id, email: me.user.email, name: me.profile?.display_name || me.user.email.split("@")[0], plan: me.plan, verified: me.user.verified, isAdmin: me.isAdmin },
+    });
+  } catch {
+    set({ status: "ready", user: null, me: null });
   }
-  return cachedUser;
+}
+
+function start() {
+  if (started || typeof window === "undefined") return;
+  started = true;
+  supabaseBrowser().auth.onAuthStateChange((event, session) => {
+    if (!session) set({ status: "ready", user: null, me: null });
+    else if (event === "INITIAL_SESSION" || event === "SIGNED_IN" || event === "USER_UPDATED") void loadMe();
+  });
+}
+
+/** Re-fetches plan/usage after a change (e.g. checkout or publish). */
+export function refreshSession() {
+  return loadMe();
+}
+
+function subscribe(cb: () => void) {
+  start();
+  subs.add(cb);
+  return () => {
+    subs.delete(cb);
+  };
+}
+
+const serverState: SessionState = { status: "loading", user: null, me: null };
+
+export function useSession() {
+  return useSyncExternalStore(subscribe, () => state, () => serverState);
 }
 
 export function useUser() {
-  return useSyncExternalStore(authService.subscribe, getUserSnapshot, () => null);
+  return useSession().user;
 }
 
 export function useMounted() {
@@ -33,26 +71,9 @@ export function useMounted() {
   );
 }
 
-/** Resolves `idb:` media references to object URLs; passes other URLs through. */
-export function useMediaSrc(src?: string) {
-  const isIdb = !!src?.startsWith("idb:");
-  const [blob, setBlob] = useState<{ key: string; url: string } | null>(null);
-  useEffect(() => {
-    if (!src || !isIdb) return;
-    let url: string | undefined;
-    let cancelled = false;
-    mediaStore.get(src.slice(4)).then((b) => {
-      if (cancelled || !b) return;
-      url = URL.createObjectURL(b);
-      setBlob({ key: src, url });
-    });
-    return () => {
-      cancelled = true;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [src, isIdb]);
-  if (!isIdb) return src;
-  return blob && blob.key === src ? blob.url : undefined;
+/** Resolves card media (`media:`/`path:`/`scene:`/URLs) to a loadable URL. */
+export function useMediaSrc(src?: string, variant: "full" | "thumb" = "full") {
+  return useResolvedSrc(src, variant);
 }
 
 export function useMediaQuery(query: string) {

@@ -71,7 +71,18 @@ export const templates: Template[] = seeds.map((s) => ({
   interactive: !(s.interactions.length === 1 && s.interactions[0] === "story"),
 }));
 
-export const templateMap = Object.fromEntries(templates.map((t) => [t.id, t]));
+export const templateMap: Record<string, Template> = Object.fromEntries(templates.map((t) => [t.id, t]));
+
+/**
+ * Replaces the built-in catalogue with the published catalogue from the database.
+ * Called once per render tree by <CatalogHydrator/>; mutates in place so existing imports stay valid.
+ */
+export function hydrateTemplates(list: Template[]) {
+  if (!list.length) return;
+  templates.splice(0, templates.length, ...list);
+  for (const k of Object.keys(templateMap)) delete templateMap[k];
+  for (const t of list) templateMap[t.id] = t;
+}
 
 export function getTemplate(id: string | undefined | null): Template | undefined {
   return id ? templateMap[id] : undefined;

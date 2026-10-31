@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Caveat, DM_Sans, Dancing_Script, Instrument_Serif } from "next/font/google";
+import { CatalogHydrator } from "@/components/catalog-hydrator";
 import { Providers } from "@/components/providers";
+import { getCatalog } from "@/server/catalog";
 import "./globals.css";
 
 const instrument = Instrument_Serif({
@@ -36,7 +38,8 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const catalog = await getCatalog();
   return (
     <html
       lang="en"
@@ -44,6 +47,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${instrument.variable} ${dmSans.variable} ${caveat.variable} ${dancing.variable} antialiased`}
     >
       <body className="min-h-dvh">
+        <CatalogHydrator templates={catalog.templates} occasions={catalog.occasions} />
         <Providers>{children}</Providers>
       </body>
     </html>

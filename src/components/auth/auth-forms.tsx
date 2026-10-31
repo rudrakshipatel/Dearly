@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ArrowLeft, Eye, EyeOff, MailCheck } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Field, Input } from "../ui/form";
 import { useToast } from "../ui/toast";
+import { track } from "@/lib/analytics";
 
 function Heading({ title, sub }: { title: React.ReactNode; sub?: React.ReactNode }) {
   return (
@@ -23,10 +24,16 @@ function Heading({ title, sub }: { title: React.ReactNode; sub?: React.ReactNode
   );
 }
 
+/** Where to go after signing in — only same-site paths are honoured. */
+function useNext() {
+  const next = useSearchParams().get("next");
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
+}
+
 function GoogleButton({ label }: { label: string }) {
   const [busy, setBusy] = useState(false);
-  const router = useRouter();
   const toast = useToast();
+  const next = useNext();
   return (
     <Button
       type="button"
@@ -37,10 +44,10 @@ function GoogleButton({ label }: { label: string }) {
       onClick={async () => {
         setBusy(true);
         try {
-          await authService.signInWithGoogle();
-          toast.success("Signed in with Google.");
-          router.push("/dashboard");
-        } finally {
+          // Redirects to Google, then back through /auth/callback.
+          await authService.signInWithGoogle(next);
+        } catch (e) {
+          toast.error({ title: "Google sign-in isn't available", description: e instanceof Error ? e.message : undefined });
           setBusy(false);
         }
       }}
@@ -89,7 +96,8 @@ const signInSchema = z.object({
 export function SignInForm() {
   const router = useRouter();
   const toast = useToast();
-  const [error, setError] = useState<string | null>(null);
+  const next = useNext();
+  const [error, setError] = useState<string | null>(useSearchParams().get("error"));
   const {
     register,
     handleSubmit,
@@ -106,9 +114,10 @@ export function SignInForm() {
         onSubmit={handleSubmit(async ({ email, password }) => {
           setError(null);
           try {
-            const u = await authService.signIn(email, password);
-            toast.success(`Welcome back, ${u.name.split(" ")[0]}.`);
-            router.push("/dashboard");
+            await authService.signIn(email, password);
+            toast.success("Welcome back.");
+            router.replace(next);
+            router.refresh();
           } catch (e) {
             setError(e instanceof Error ? e.message : "We couldn't sign you in.");
           }
@@ -164,6 +173,7 @@ export function SignUpForm() {
     register,
     handleSubmit,
     watch,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<z.infer<typeof signUpSchema>>({ resolver: zodResolver(signUpSchema), defaultValues: { terms: false } });
   const pw = watch("password") ?? "";
@@ -177,8 +187,17 @@ export function SignUpForm() {
         noValidate
         className="space-y-4"
         onSubmit={handleSubmit(async ({ name, email, password }) => {
-          await authService.signUp(name, email, password);
-          router.push(`/verify-email?email=${encodeURIComponent(email)}`);
+          try {
+            const { needsVerification } = await authService.signUp(name, email, password);
+            track("signup_completed");
+            if (needsVerification) router.push(`/verify-email?email=${encodeURIComponent(email)}`);
+            else {
+              router.replace("/dashboard");
+              router.refresh();
+            }
+          } catch (e) {
+            setError("root", { message: e instanceof Error ? e.message : "We couldn't create your account." });
+          }
         })}
       >
         <Field label="Your name" htmlFor="name" error={errors.name?.message}>
@@ -212,6 +231,11 @@ export function SignUpForm() {
         {errors.terms && (
           <p role="alert" className="text-[13px] text-rose-deep">
             {errors.terms.message}
+          </p>
+        )}
+        {errors.root && (
+          <p role="alert" className="rounded-xl bg-blush px-4 py-3 text-[14px] text-rose-deep">
+            {errors.root.message}
           </p>
         )}
         <Button type="submit" size="lg" className="w-full" loading={isSubmitting}>
@@ -287,9 +311,12 @@ export function VerifyEmailForm({ email }: { email?: string }) {
     setBusy(true);
     setError(null);
     try {
-      await authService.verifyEmail(code);
+      const address = email || user?.email;
+      if (!address) throw new Error("Open the link in your email, or sign in again to get a new code.");
+      await authService.verifyEmail(address, code);
       toast.success("Email verified. Welcome to Dearly!");
-      router.push("/dashboard");
+      router.replace("/dashboard");
+      router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "That code didn't work.");
     } finally {
@@ -317,7 +344,7 @@ export function VerifyEmailForm({ email }: { email?: string }) {
   return (
     <>
       <MailCheck className="mb-6 size-10 text-burgundy" />
-      <Heading title={<>Check your <em>email.</em></>} sub={<>We sent a 6-digit code to <strong className="text-ink">{email || user?.email || "your inbox"}</strong>. Enter it below to verify your account.</>} />
+      <Heading title={<>Check your <em>email.</em></>} sub={<>We sent a confirmation link and code to <strong className="text-ink">{email || user?.email || "your inbox"}</strong>. Enter it below to verify your account.</>} />
       <div className="flex justify-between gap-2" role="group" aria-label="Verification code">
         {digits.map((d, i) => (
           <input
@@ -351,14 +378,71 @@ export function VerifyEmailForm({ email }: { email?: string }) {
         <button
           className="font-medium text-burgundy underline-offset-4 hover:underline"
           onClick={async () => {
-            await authService.resendVerification();
-            toast.info("A new code is on its way.");
+            const address = email || user?.email;
+            if (!address) return toast.error("Sign in again to get a new code.");
+            try {
+              await authService.resendVerification(address);
+              toast.info("A new email is on its way.");
+            } catch (e) {
+              toast.error(e instanceof Error ? e.message : "Couldn't resend right now.");
+            }
           }}
         >
           Resend code
         </button>
       </p>
-      <p className="mt-2 text-center text-[12px] text-muted">Demo: any 6 digits will verify.</p>
+      <p className="mt-2 text-center text-[12px] text-muted">You can also just tap the link in the email.</p>
+    </>
+  );
+}
+
+/* ---------------------------------------------------------- Reset password */
+
+const resetSchema = z
+  .object({ password: z.string().min(8, "Use at least 8 characters.").regex(/[A-Za-z]/, "Include a letter.").regex(/\d/, "Include a number."), confirm: z.string() })
+  .refine((v) => v.password === v.confirm, { message: "Passwords don't match.", path: ["confirm"] });
+
+export function ResetPasswordForm() {
+  const router = useRouter();
+  const toast = useToast();
+  const user = useUser();
+  const {
+    register,
+    handleSubmit,
+    setError,
+    formState: { errors, isSubmitting },
+  } = useForm<z.infer<typeof resetSchema>>({ resolver: zodResolver(resetSchema) });
+  return (
+    <>
+      <Heading title={<>Choose a new <em>password.</em></>} sub={user ? `For ${user.email}` : "Open this page from the link in your reset email."} />
+      <form
+        noValidate
+        className="space-y-4"
+        onSubmit={handleSubmit(async ({ password }) => {
+          try {
+            await authService.updatePassword(password);
+            toast.success("Password updated.");
+            router.replace("/dashboard");
+          } catch (e) {
+            setError("root", { message: e instanceof Error ? e.message : "That link may have expired. Request a new one." });
+          }
+        })}
+      >
+        <Field label="New password" htmlFor="password" error={errors.password?.message}>
+          <PasswordInput id="password" autoComplete="new-password" invalid={!!errors.password} {...register("password")} />
+        </Field>
+        <Field label="Confirm password" htmlFor="confirm" error={errors.confirm?.message}>
+          <PasswordInput id="confirm" autoComplete="new-password" invalid={!!errors.confirm} {...register("confirm")} />
+        </Field>
+        {errors.root && (
+          <p role="alert" className="rounded-xl bg-blush px-4 py-3 text-[14px] text-rose-deep">
+            {errors.root.message}
+          </p>
+        )}
+        <Button type="submit" size="lg" className="w-full" loading={isSubmitting}>
+          Update password
+        </Button>
+      </form>
     </>
   );
 }

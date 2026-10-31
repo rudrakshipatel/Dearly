@@ -80,15 +80,25 @@ function Scratch({ creation, onContinue, compact }: ExperienceProps) {
     paint();
   }, [paint]);
 
+  const last = useRef<{ x: number; y: number } | null>(null);
   const scratchAt = (e: React.PointerEvent) => {
     const c = canvasRef.current;
     if (!c || done) return;
     const rect = c.getBoundingClientRect();
     const ctx = c.getContext("2d")!;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    // Draw a continuous stroke from the previous point so fast swipes don't leave gaps.
     ctx.globalCompositeOperation = "destination-out";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = (compact ? 16 : 24) * 2;
     ctx.beginPath();
-    ctx.arc(e.clientX - rect.left, e.clientY - rect.top, compact ? 16 : 24, 0, Math.PI * 2);
-    ctx.fill();
+    const from = last.current ?? { x, y };
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(x + 0.01, y);
+    ctx.stroke();
+    last.current = { x, y };
     if (++moves.current % 12 === 0) {
       const data = ctx.getImageData(0, 0, c.width, c.height).data;
       let clear = 0;
@@ -115,7 +125,14 @@ function Scratch({ creation, onContinue, compact }: ExperienceProps) {
             scratchAt(e);
           }}
           onPointerMove={(e) => drawing.current && scratchAt(e)}
-          onPointerUp={() => (drawing.current = false)}
+          onPointerUp={() => {
+            drawing.current = false;
+            last.current = null;
+          }}
+          onPointerCancel={() => {
+            drawing.current = false;
+            last.current = null;
+          }}
           aria-hidden
         />
       </div>

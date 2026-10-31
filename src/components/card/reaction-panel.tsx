@@ -1,15 +1,17 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { Bookmark, BookmarkCheck, Droplets, HandHeart, Heart, RotateCcw, Send, Sparkles } from "lucide-react";
+import { Bookmark, BookmarkCheck, Droplets, Flag, HandHeart, Heart, ImagePlus, Loader2, RotateCcw, Send, Sparkles, X } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
-import { getTemplate } from "@/lib/data/templates";
-import { reactionService, receivedService } from "@/lib/services";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { useUser } from "@/lib/hooks";
+import { publicCardService, receivedService } from "@/lib/services";
 import type { Creation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Wordmark } from "../brand/logo";
 import { Confetti, ExperienceButton, StageBackground, isDark, usePalette } from "../experiences/shared";
+import { Dialog, DialogContent } from "../ui/dialog";
 import { useToast } from "../ui/toast";
 
 const reactions = [
@@ -19,7 +21,7 @@ const reactions = [
   { id: "wow", label: "Wow", Icon: Sparkles },
 ];
 
-export function ReactionPanel({ creation, replay, preview }: { creation: Creation; replay: () => void; preview?: boolean }) {
+export function ReactionPanel({ creation, replay, preview, onShown }: { creation: Creation; replay: () => void; preview?: boolean; onShown?: () => void }) {
   const p = usePalette(creation);
   const dark = isDark(creation);
   const toast = useToast();
@@ -28,16 +30,31 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const t = getTemplate(creation.templateId);
+  const [photo, setPhoto] = useState<{ file: File; preview: string } | null>(null);
+  const [reporting, setReporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const user = useUser();
+  const router = useRouter();
+  const responsesOn = creation.allowReactions !== false;
+
+  useEffect(() => {
+    onShown?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const send = async () => {
     if (!picked) return;
+    if (preview) {
+      setSent(true);
+      return;
+    }
     setBusy(true);
     try {
-      await reactionService.send(creation.slug, picked, note.trim() || undefined);
+      const photoPath = photo ? await publicCardService.uploadResponsePhoto(creation.slug, photo.file) : undefined;
+      await publicCardService.react(creation.slug, picked, note.trim() || undefined, photoPath);
       setSent(true);
-    } catch {
-      toast.error("Couldn't send your reaction. Please try again.");
+    } catch (e) {
+      toast.error({ title: "Couldn't send your reaction", description: e instanceof Error ? e.message : undefined });
     } finally {
       setBusy(false);
     }
@@ -48,7 +65,12 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
       {sent && <Confetti colors={[p.accent, p.accent2, p.deep]} count={40} />}
       <div className="flex w-full max-w-md flex-col items-center px-6 text-center" style={{ color: dark ? p.paper : p.ink }}>
         <AnimatePresence mode="wait">
-          {!sent ? (
+          {!responsesOn ? (
+            <motion.div key="off" className="w-full">
+              <Heart className="mx-auto mb-4 size-6" style={{ color: p.accent }} fill="currentColor" />
+              <h2 className="font-display text-[clamp(30px,7vw,44px)] leading-[1.05]">Made with love, by {creation.senderName || "someone special"}</h2>
+            </motion.div>
+          ) : !sent ? (
             <motion.div key="ask" className="w-full" exit={{ opacity: 0, y: -10 }}>
               <Heart className="mx-auto mb-4 size-6" style={{ color: p.accent }} fill="currentColor" />
               <h2 className="font-display text-[clamp(30px,7vw,44px)] leading-[1.05]">Send a little love back to {creation.senderName || "them"}</h2>
@@ -83,9 +105,36 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
                 className="mt-4 h-24 w-full resize-none rounded-2xl border-0 bg-white/80 p-4 font-hand text-xl text-ink placeholder:text-ink/40 focus:outline-none focus:ring-2"
                 style={{ ["--tw-ring-color" as string]: p.deep }}
               />
+              {creation.allowResponsePhoto && (
+                <div className="mt-3 flex items-center justify-center gap-3">
+                  {photo ? (
+                    <span className="relative">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- local preview */}
+                      <img src={photo.preview} alt="Your photo" className="size-16 rounded-xl object-cover" />
+                      <button aria-label="Remove photo" onClick={() => setPhoto(null)} className="absolute -right-2 -top-2 grid size-6 place-items-center rounded-full bg-ink text-white">
+                        <X className="size-3" />
+                      </button>
+                    </span>
+                  ) : (
+                    <button onClick={() => fileRef.current?.click()} className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[13px]" style={{ background: dark ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.6)" }}>
+                      <ImagePlus className="size-4" /> Add a photo back
+                    </button>
+                  )}
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) setPhoto({ file: f, preview: URL.createObjectURL(f) });
+                    }}
+                  />
+                </div>
+              )}
               <div className="mt-5 flex flex-col items-center gap-3">
                 <ExperienceButton creation={creation} onClick={send} className={cn(!picked && "pointer-events-none opacity-40")}>
-                  {busy ? "Sending…" : <><Send className="size-4" /> Send reaction</>}
+                  {busy ? <><Loader2 className="size-4 animate-spin" /> Sending…</> : <><Send className="size-4" /> Send reaction</>}
                 </ExperienceButton>
               </div>
             </motion.div>
@@ -104,10 +153,17 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
           {!preview && (
             <button
               onClick={async () => {
-                await receivedService.markOpened({ slug: creation.slug, title: t?.headline ?? creation.title, from: creation.senderName, occasion: creation.occasion, palette: creation.palette, motif: t?.motif ?? "envelope" });
-                if (!saved) await receivedService.toggleSave(creation.slug);
-                setSaved(true);
-                toast.success({ title: "Saved to your cards", description: "Find it under Received in My Creations." });
+                if (!user) {
+                  toast.info({ title: "Sign in to keep this card", description: "It'll wait for you under Received.", action: { label: "Sign in", onClick: () => router.push(`/sign-in?next=${encodeURIComponent(`/card/${creation.slug}`)}`) } });
+                  return;
+                }
+                try {
+                  await receivedService.setSaved(creation.slug, !saved);
+                  setSaved(!saved);
+                  if (!saved) toast.success({ title: "Saved to your cards", description: "Find it under Received in My Creations." });
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : "Couldn't save the card.");
+                }
               }}
               className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[13px]"
               style={{ background: dark ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.6)" }}
@@ -116,6 +172,13 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
             </button>
           )}
         </div>
+
+        {!preview && (
+          <button onClick={() => setReporting(true)} className="mt-6 inline-flex items-center gap-1 text-[12px] opacity-60 hover:opacity-100">
+            <Flag className="size-3" /> Report this card
+          </button>
+        )}
+        <ReportDialog slug={creation.slug} open={reporting} onOpenChange={setReporting} />
 
         {creation.showBranding && (
           <Link href="/create" className="mt-12 flex flex-col items-center gap-1 opacity-80 transition-opacity hover:opacity-100">
@@ -126,5 +189,55 @@ export function ReactionPanel({ creation, replay, preview }: { creation: Creatio
         )}
       </div>
     </StageBackground>
+  );
+}
+
+const reasons = [
+  ["harassment", "Harassment or bullying"],
+  ["hate", "Hate speech"],
+  ["sexual", "Sexual content"],
+  ["violence", "Violence or threats"],
+  ["spam", "Spam or scam"],
+  ["impersonation", "Impersonation"],
+  ["other", "Something else"],
+] as const;
+
+function ReportDialog({ slug, open, onOpenChange }: { slug: string; open: boolean; onOpenChange: (v: boolean) => void }) {
+  const [reason, setReason] = useState<string>("harassment");
+  const [details, setDetails] = useState("");
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title="Report this card" description="Our team reviews every report. The sender isn't told who reported it." size="sm">
+        <fieldset className="space-y-2">
+          <legend className="sr-only">Reason</legend>
+          {reasons.map(([v, l]) => (
+            <label key={v} className="flex items-center gap-2.5 text-[14px]">
+              <input type="radio" name="reason" value={v} checked={reason === v} onChange={() => setReason(v)} className="accent-burgundy" /> {l}
+            </label>
+          ))}
+        </fieldset>
+        <textarea value={details} onChange={(e) => setDetails(e.target.value)} maxLength={1000} placeholder="Anything else we should know? (optional)" className="mt-4 h-24 w-full rounded-xl border border-line p-3 text-[14px]" />
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await publicCardService.report(slug, reason, details.trim() || undefined);
+              toast.success("Thanks — we'll take a look.");
+              onOpenChange(false);
+            } catch (e) {
+              toast.error(e instanceof Error ? e.message : "Couldn't send the report.");
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="mt-4 h-11 w-full rounded-full bg-ink text-[14px] text-ivory disabled:opacity-50"
+        >
+          {busy ? "Sending…" : "Send report"}
+        </button>
+      </DialogContent>
+    </Dialog>
   );
 }

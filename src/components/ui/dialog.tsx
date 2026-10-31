@@ -67,6 +67,7 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   destructive,
   onConfirm,
+  children,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -74,12 +75,15 @@ export function ConfirmDialog({
   description: string;
   confirmLabel?: string;
   destructive?: boolean;
-  onConfirm: () => Promise<void> | void;
+  /** Return false (or throw) to keep the dialog open. */
+  onConfirm: () => Promise<void | boolean> | void | boolean;
+  children?: React.ReactNode;
 }) {
   const [busy, setBusy] = React.useState(false);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title={title} description={description} size="sm">
+        {children}
         <div className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
@@ -90,8 +94,9 @@ export function ConfirmDialog({
             onClick={async () => {
               setBusy(true);
               try {
-                await onConfirm();
-                onOpenChange(false);
+                if ((await onConfirm()) !== false) onOpenChange(false);
+              } catch {
+                // The caller reports the error; keep the dialog open.
               } finally {
                 setBusy(false);
               }

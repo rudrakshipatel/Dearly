@@ -2,8 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowRight, Users } from "lucide-react";
-import { useEffect, useState } from "react";
-import { togetherService } from "@/lib/services";
+import { useState } from "react";
 import type { Contribution } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PhotoView } from "../art/scene";
@@ -21,7 +20,11 @@ export function ContributionCard({ c, compact, onClick }: { c: Contribution; com
     >
       {photo && (
         <div className="mb-3 aspect-[4/3] overflow-hidden rounded-xl">
-          <PhotoView src={photo} alt={`Photo from ${c.name}`} />
+          {/\.(mp4|webm)$/.test(c.photo ?? "") ? (
+            <video src={photo} controls playsInline preload="metadata" className="size-full object-cover" onClick={(e) => e.stopPropagation()} />
+          ) : (
+            <PhotoView src={photo} alt={`Photo from ${c.name}`} />
+          )}
         </div>
       )}
       <p className={cn("font-hand leading-snug text-ink", compact ? "text-base" : "text-[22px]")}>{c.message}</p>
@@ -32,22 +35,11 @@ export function ContributionCard({ c, compact, onClick }: { c: Contribution; com
 
 export function TogetherExperience({ creation, onContinue, compact }: ExperienceProps) {
   const p = usePalette(creation);
-  const [items, setItems] = useState<Contribution[]>(creation.contributions ?? []);
+  // Approved contributions arrive with the card (owner moderation happens before they're public).
+  const items: Contribution[] = creation.contributions ?? [];
   const [opened, setOpened] = useState(false);
   const [focus, setFocus] = useState<Contribution | null>(null);
   const dark = isDark(creation);
-
-  useEffect(() => {
-    let alive = true;
-    togetherService.list(creation.slug).then((list) => {
-      if (!alive) return;
-      const ids = new Set((creation.contributions ?? []).map((c) => c.id));
-      setItems([...(creation.contributions ?? []), ...list.filter((c) => !ids.has(c.id))]);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [creation.slug, creation.contributions]);
 
   const count = items.length + 1;
 

@@ -2,6 +2,7 @@
 
 import { Check, Globe, Minus } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { formatPrice, pricing } from "@/lib/data/pricing";
 import { useUser } from "@/lib/hooks";
@@ -21,14 +22,23 @@ export function PricingTable() {
   const [busy, setBusy] = useState<PlanId | null>(null);
   const user = useUser();
   const toast = useToast();
+  const router = useRouter();
   const r = pricing.regions.find((x) => x.code === region) ?? pricing.regions[0];
   const current = user?.plan ?? "free";
 
   const checkout = async (plan: PlanId) => {
+    if (plan === "free") return;
+    if (!user) {
+      router.push(`/sign-up?next=${encodeURIComponent("/pricing")}`);
+      return;
+    }
     setBusy(plan);
     try {
-      await billingService.startCheckout(plan, cycle);
-      toast.success({ title: `You're on ${plan[0].toUpperCase() + plan.slice(1)}`, description: "Demo checkout — no payment was taken. Billing connects in the next phase." });
+      const result = await billingService.checkout({ kind: "subscription", plan, cycle }, region, "/account");
+      // Razorpay completes in an overlay; access still only changes once the verified webhook arrives.
+      if (result === "completed") router.push("/account?checkout=success");
+    } catch (e) {
+      toast.error({ title: "Checkout couldn't start", description: e instanceof Error ? e.message : undefined });
     } finally {
       setBusy(null);
     }
@@ -91,11 +101,11 @@ export function PricingTable() {
                   size="lg"
                   className={cn("mt-8 w-full", plan.featured && "bg-ivory text-burgundy hover:bg-champagne")}
                   variant={plan.featured ? "primary" : "primary"}
-                  disabled={isCurrent}
+                  disabled={isCurrent && !!user}
                   loading={busy === plan.id}
                   onClick={() => checkout(plan.id)}
                 >
-                  {isCurrent ? "Your current plan" : plan.cta}
+                  {isCurrent && user ? "Your current plan" : plan.cta}
                 </Button>
               )}
             </div>

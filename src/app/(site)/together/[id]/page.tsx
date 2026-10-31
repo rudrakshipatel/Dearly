@@ -5,9 +5,10 @@ import { Container, Skeleton } from "@/components/ui/misc";
 
 export const metadata: Metadata = {
   title: "Sign the group card",
-  robots: { index: false },
+  robots: { index: false, follow: false },
 };
 
+/** /together/<invitation token> — contributors add messages without an account. */
 export default function TogetherRoute({ params }: PageProps<"/together/[id]">) {
   return (
     <Suspense
@@ -18,7 +19,7 @@ export default function TogetherRoute({ params }: PageProps<"/together/[id]">) {
       }
     >
       {params.then(({ id }) => (
-        <TogetherPage id={id} />
+        <TogetherPage token={id} />
       ))}
     </Suspense>
   );

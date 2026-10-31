@@ -1,9 +1,10 @@
 "use client";
 
-import { ImagePlus, Loader2, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { ImagePlus, Loader2, LogIn, X } from "lucide-react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { useUser } from "@/lib/hooks";
 import { uploadService } from "@/lib/services";
-import { StorageFullError } from "@/lib/services/storage";
 import type { Photo } from "@/lib/types";
 import { cn, uid } from "@/lib/utils";
 import { PhotoView, sceneNames } from "../art/scene";
@@ -14,38 +15,53 @@ export function PhotoUploader({
   onChange,
   max = 12,
   withDetails,
+  cardId,
 }: {
   photos: Photo[];
   onChange: (photos: Photo[]) => void;
   max?: number;
   withDetails?: boolean;
+  cardId?: string | null;
 }) {
   const input = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(0);
+  const [uploads, setUploads] = useState<{ id: string; name: string; progress: number; abort: AbortController }[]>([]);
+  const busy = uploads.length;
   const [dragOver, setDragOver] = useState(false);
   const toast = useToast();
+  const user = useUser();
+  const latest = useRef(photos);
+  useEffect(() => {
+    latest.current = photos;
+  }, [photos]);
 
   const add = async (files: FileList | File[]) => {
-    const list = Array.from(files).slice(0, max - photos.length);
-    if (!list.length) {
-      toast.info(`You can add up to ${max} photos.`);
+    if (!user) {
+      toast.info("Sign in to add your own photos — your draft is kept.");
       return;
     }
-    setBusy(list.length);
-    const added: Photo[] = [];
-    for (const f of list) {
-      try {
-        added.push({ id: uid("p-"), src: await uploadService.uploadImage(f, 1200), caption: "" });
-      } catch (e) {
-        toast.error({ title: "Couldn't add a photo", description: e instanceof Error ? e.message : undefined });
-      }
-      setBusy((b) => b - 1);
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/")).slice(0, max - photos.length);
+    if (!list.length) {
+      toast.info(`You can add up to ${max} photos (JPG, PNG or WebP).`);
+      return;
     }
-    try {
-      onChange([...photos, ...added]);
-    } catch (e) {
-      if (e instanceof StorageFullError) toast.error(e.message);
-    }
+    await Promise.all(
+      list.map(async (f) => {
+        const job = { id: uid("u-"), name: f.name, progress: 0, abort: new AbortController() };
+        setUploads((u) => [...u, job]);
+        try {
+          const up = await uploadService.upload(f, {
+            cardId,
+            signal: job.abort.signal,
+            onProgress: (progress) => setUploads((u) => u.map((x) => (x.id === job.id ? { ...x, progress } : x))),
+          });
+          onChange([...latest.current, { id: uid("p-"), src: up.src, caption: "" }]);
+        } catch (e) {
+          if ((e as Error).name !== "AbortError") toast.error({ title: `Couldn't add ${f.name}`, description: e instanceof Error ? e.message : undefined });
+        } finally {
+          setUploads((u) => u.filter((x) => x.id !== job.id));
+        }
+      }),
+    );
   };
 
   const update = (id: string, patch: Partial<Photo>) => onChange(photos.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -87,9 +103,15 @@ export function PhotoUploader({
             )}
           </div>
         ))}
-        {Array.from({ length: busy }).map((_, i) => (
-          <div key={`busy-${i}`} className="skeleton grid aspect-square place-items-center rounded-xl">
-            <Loader2 className="size-5 animate-spin text-muted" />
+        {uploads.map((u) => (
+          <div key={u.id} className="skeleton relative grid aspect-square place-items-center rounded-xl">
+            <div className="flex flex-col items-center gap-1 text-[12px] text-ink/70">
+              <Loader2 className="size-5 animate-spin text-muted" />
+              {Math.round(u.progress * 100)}%
+              <button type="button" onClick={() => u.abort.abort()} className="text-rose-deep underline">
+                Cancel
+              </button>
+            </div>
           </div>
         ))}
         {photos.length + busy < max && (
@@ -117,7 +139,16 @@ export function PhotoUploader({
           </button>
         )}
       </div>
-      <input ref={input} type="file" accept="image/*" multiple hidden onChange={(e) => e.target.files && add(e.target.files)} />
+      <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={(e) => e.target.files && add(e.target.files)} />
+      {!user && (
+        <p className="mt-3 flex items-center gap-2 text-[12.5px] text-muted">
+          <LogIn className="size-3.5" />
+          <Link href="/sign-in?next=/create" className="text-burgundy underline underline-offset-2">
+            Sign in
+          </Link>
+          to upload your own photos. Your draft is kept while you do.
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
         <span>No photos handy? Try a sample:</span>
         {sceneNames.slice(0, 5).map((s) => (

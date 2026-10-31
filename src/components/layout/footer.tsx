@@ -19,7 +19,7 @@ const columns = [
       { href: "/create", label: "Create a card" },
       { href: "/explore", label: "Explore templates" },
       { href: "/experiences", label: "Experiences" },
-      { href: "/together/happy-birthday-leo", label: "Group cards" },
+      { href: "/together/DemoGroupCardHappyBirthdayLeo2026", label: "Group cards" },
     ],
   },
   {

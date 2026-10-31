@@ -124,7 +124,7 @@ export function PropertiesPanel({
         </Section>
       )}
 
-      {el.type === "image" && <ImageProps el={el} actions={actions} />}
+      {el.type === "image" && <ImageProps el={el} actions={actions} cardId={doc.id} />}
 
       {el.type === "sticker" && (
         <Section title="Sticker">
@@ -228,7 +228,7 @@ export function PropertiesPanel({
   );
 }
 
-function ImageProps({ el, actions }: { el: ImageElement; actions: EditorActions }) {
+function ImageProps({ el, actions, cardId }: { el: ImageElement; actions: EditorActions; cardId: string }) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const toast = useToast();
@@ -242,14 +242,14 @@ function ImageProps({ el, actions }: { el: ImageElement; actions: EditorActions 
       <input
         ref={input}
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
         hidden
         onChange={async (e) => {
           const f = e.target.files?.[0];
           if (!f) return;
           setBusy(true);
           try {
-            set({ src: await uploadService.uploadImage(f, 1200) });
+            set({ src: (await uploadService.upload(f, { cardId })).src });
           } catch (err) {
             toast.error({ title: "Upload failed", description: err instanceof Error ? err.message : undefined });
           } finally {

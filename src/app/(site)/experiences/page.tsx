@@ -18,7 +18,7 @@ const demo: Record<string, { slug: string; category: TemplateCategory; extra?: {
   surprise: { slug: "for-maya", category: "interactive-surprises" },
   memories: { slug: "our-story", category: "memory-books" },
   reveal: { slug: "scratch-for-ava", category: "interactive-surprises" },
-  together: { slug: "happy-birthday-leo", category: "group-cards", extra: { href: "/together/happy-birthday-leo", label: "Try signing a group card" } },
+  together: { slug: "happy-birthday-leo", category: "group-cards", extra: { href: "/together/DemoGroupCardHappyBirthdayLeo2026", label: "Try signing a group card" } },
 };
 
 const createKind: Partial<Record<ExperienceKind, string>> = { letter: "surprise", reveal: "surprise", together: "together", memories: "memories", surprise: "surprise" };

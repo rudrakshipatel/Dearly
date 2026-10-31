@@ -11,12 +11,12 @@ import { TemplateCard } from "@/components/templates/template-card";
 import { Button } from "@/components/ui/button";
 import { Container, SectionHeading, Skeleton } from "@/components/ui/misc";
 import { coreExperiences } from "@/lib/data/experiences";
-import { getOccasion, occasionInSentence, occasionMap, occasions } from "@/lib/data/occasions";
+import { getOccasion, occasionInSentence, occasionMap } from "@/lib/data/occasions";
 import { isDarkBg, palettes } from "@/lib/data/palettes";
-import { templates } from "@/lib/data/templates";
+import { getCatalog } from "@/server/catalog";
 
-export function generateStaticParams() {
-  return occasions.map((o) => ({ slug: o.slug }));
+export async function generateStaticParams() {
+  return (await getCatalog()).occasions.map((o) => ({ slug: o.slug }));
 }
 
 export async function generateMetadata({ params }: PageProps<"/occasions/[slug]">): Promise<Metadata> {
@@ -28,11 +28,12 @@ export async function generateMetadata({ params }: PageProps<"/occasions/[slug]"
 
 export default async function OccasionPage({ params }: PageProps<"/occasions/[slug]">) {
   const { slug } = await params;
-  const o = getOccasion(slug);
+  const catalog = await getCatalog();
+  const o = catalog.occasions.find((x) => x.slug === slug);
   if (!o) notFound();
   const p = palettes[o.palette];
   const dark = isDarkBg(o.palette);
-  const own = templates.filter((t) => t.occasion === o.slug);
+  const own = catalog.templates.filter((t) => t.occasion === o.slug);
   const popular = [...own].sort((a, b) => b.popularity - a.popularity).slice(0, 4);
   const suggested = coreExperiences.filter((e) => o.suggested.includes(e.kind));
 
@@ -140,9 +141,12 @@ export default async function OccasionPage({ params }: PageProps<"/occasions/[sl
         <Container>
           <h2 className="eyebrow mb-6">Related occasions</h2>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:w-3/4">
-            {o.related.map((r) => (
-              <OccasionCard key={r} occasion={occasionMap[r]} size="sm" />
-            ))}
+            {o.related
+              .map((r) => catalog.occasions.find((x) => x.slug === r) ?? occasionMap[r])
+              .filter(Boolean)
+              .map((r) => (
+                <OccasionCard key={r.slug} occasion={r} size="sm" />
+              ))}
           </div>
         </Container>
       </section>

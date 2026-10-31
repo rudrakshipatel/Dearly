@@ -92,7 +92,7 @@ export function Navbar() {
           <Link href="/dashboard" className="rounded-full px-3.5 py-2 text-[14px] text-ink/75 hover:text-ink">
             My Creations
           </Link>
-          {user ? <AccountMenu name={user.name} /> : (
+          {user ? <AccountMenu name={user.name} isAdmin={user.isAdmin} /> : (
             <>
               <Link href="/sign-in" className="rounded-full px-3.5 py-2 text-[14px] text-ink/75 hover:text-ink">
                 Sign in
@@ -214,7 +214,7 @@ function SignOutButton() {
   );
 }
 
-function AccountMenu({ name }: { name: string }) {
+function AccountMenu({ name, isAdmin }: { name: string; isAdmin?: boolean }) {
   const [open, setOpen] = useState(false);
   const toast = useToast();
   const router = useRouter();
@@ -234,7 +234,8 @@ function AccountMenu({ name }: { name: string }) {
           {[
             ["/dashboard", "My creations"],
             ["/dashboard?tab=received", "Received cards"],
-            ["/pricing", "Plan & billing"],
+            ["/account", "Account & billing"],
+            ...(isAdmin ? [["/admin", "Admin"]] : []),
           ].map(([href, label]) => (
             <Link key={href} role="menuitem" href={href} className="block rounded-xl px-3 py-2 text-[14px] hover:bg-blush/60">
               {label}
@@ -247,6 +248,7 @@ function AccountMenu({ name }: { name: string }) {
               await authService.signOut();
               toast.info("You've been signed out.");
               router.push("/");
+              router.refresh();
             }}
           >
             <LogOut className="size-4" /> Sign out

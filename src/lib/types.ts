@@ -175,6 +175,10 @@ export interface InteractionSettings {
   sound: "none" | "music-box" | "soft-piano" | "custom";
   audioSrc?: string;
   videoSrc?: string;
+  /** Extra surprises revealed one after another (Surprise engine). */
+  extraSurprises?: string[];
+  /** Further letter pages after the main message (Letter engine). */
+  letterPages?: string[];
 }
 
 export type ElementAnimation = "none" | "fade" | "rise" | "pop" | "drift" | "float";
@@ -277,6 +281,24 @@ export interface Creation {
   showBranding: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Server-side fields (present once the card is stored in the database). */
+  version?: number;
+  allowReactions?: boolean;
+  allowResponsePhoto?: boolean;
+  recipientEmail?: string;
+  timezone?: string;
+  publishedAt?: string;
+  viewCount?: number;
+  lastOpenedAt?: string;
+  hasPassword?: boolean;
+  isDisabled?: boolean;
+  disabledReason?: string;
+  contributionToken?: string;
+  contributionDeadline?: string;
+  contributionLimit?: number;
+  contributionsRequireApproval?: boolean;
+  isSample?: boolean;
+  reactionCount?: number;
 }
 
 export interface ReceivedCard {
@@ -297,6 +319,7 @@ export interface User {
   email: string;
   plan: PlanId;
   verified: boolean;
+  isAdmin?: boolean;
 }
 
 export type PlanId = "free" | "premium" | "pro";

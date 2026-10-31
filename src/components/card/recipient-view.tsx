@@ -1,65 +1,110 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowLeft, Clock, MailQuestion, Volume2, VolumeX } from "lucide-react";
+import { ArrowLeft, Clock, Lock, MailQuestion, Volume2, VolumeX } from "lucide-react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
-import { sampleSlugs } from "@/lib/data/samples";
-import { getTemplate } from "@/lib/data/templates";
-import { useNow } from "@/lib/hooks";
+import { useEffect, useRef, useState } from "react";
+import { track } from "@/lib/analytics";
+import { palettes } from "@/lib/data/palettes";
+import { useNow, useUser } from "@/lib/hooks";
 import { useAmbientSound } from "@/lib/hooks/use-ambient-sound";
-import { creationService, receivedService } from "@/lib/services";
+import { MediaScopeProvider } from "@/lib/media/resolver";
+import { ApiClientError, creationService, publicCardService, receivedService } from "@/lib/services";
 import type { Creation } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 import { Wordmark } from "../brand/logo";
 import { Envelope } from "../experiences/envelope";
 import { ExperiencePlayer } from "../experiences/player";
-import { StageBackground, isDark, usePalette } from "../experiences/shared";
+import { isDark, usePalette } from "../experiences/shared";
 import { Button } from "../ui/button";
+
+type LoadState =
+  | { status: "loading" }
+  | { status: "missing" }
+  | { status: "error"; message: string }
+  | { status: "scheduled"; scheduledAt: string; senderName: string; palette: Creation["palette"] }
+  | { status: "locked"; senderName: string; palette: Creation["palette"]; wrongPassword: boolean }
+  | { status: "ready"; creation: Creation; ownerPreview: boolean };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function RecipientView({ slug }: { slug: string }) {
   const params = useSearchParams();
-  const preview = params.get("preview") === "1";
-  const [state, setState] = useState<{ status: "loading" } | { status: "missing" } | { status: "ready"; creation: Creation }>({ status: "loading" });
+  const previewParam = params.get("preview");
+  // `?preview=<card id>` lets the owner preview drafts; `?preview=1` previews a live card without counting a view.
+  const ownerPreviewId = previewParam && UUID.test(previewParam) ? previewParam : null;
+  const preview = !!previewParam;
+  const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [password, setPassword] = useState<string | undefined>();
 
   useEffect(() => {
     let alive = true;
-    creationService.getBySlug(slug).then((c) => {
-      if (!alive) return;
-      setState(c ? { status: "ready", creation: c } : { status: "missing" });
-    });
+    (async () => {
+      try {
+        if (ownerPreviewId) {
+          const c = await creationService.get(ownerPreviewId);
+          if (alive) setState({ status: "ready", creation: c, ownerPreview: true });
+          return;
+        }
+        const r = await publicCardService.get(slug, password);
+        if (!alive) return;
+        if (r.state === "open") setState({ status: "ready", creation: r.card, ownerPreview: false });
+        else if (r.state === "missing") setState({ status: "missing" });
+        else setState(r.state === "scheduled" ? { status: "scheduled", scheduledAt: r.scheduledAt, senderName: r.senderName, palette: r.palette } : { status: "locked", senderName: r.senderName, palette: r.palette, wrongPassword: r.wrongPassword });
+      } catch (e) {
+        if (alive) setState(e instanceof ApiClientError && (e.status === 404 || e.status === 401) ? { status: "missing" } : { status: "error", message: e instanceof Error ? e.message : "Couldn't load this card." });
+      }
+    })();
     return () => {
       alive = false;
     };
-  }, [slug]);
-
-  useEffect(() => {
-    if (state.status !== "ready" || preview) return;
-    const c = state.creation;
-    const t = getTemplate(c.templateId);
-    receivedService.markOpened({ slug: c.slug, title: t?.headline ?? c.title, from: c.senderName, occasion: c.occasion, palette: c.palette, motif: t?.motif ?? "envelope" }).catch(() => {});
-  }, [state, preview]);
+  }, [slug, password, ownerPreviewId]);
 
   if (state.status === "loading") return <CardLoading label="Opening your surprise…" />;
   if (state.status === "missing") return <CardMissing />;
-  return <Ready creation={state.creation} preview={preview} />;
+  if (state.status === "error") return <CardMissing title="We couldn't open this card" body={state.message} />;
+  if (state.status === "scheduled") return <Waiting {...state} />;
+  if (state.status === "locked") return <Locked {...state} onSubmit={setPassword} />;
+  return (
+    <MediaScopeProvider slug={state.ownerPreview ? undefined : slug}>
+      <Ready creation={state.creation} preview={preview} ownerPreview={state.ownerPreview} />
+    </MediaScopeProvider>
+  );
 }
 
-function Ready({ creation, preview }: { creation: Creation; preview: boolean }) {
+function Ready({ creation, preview, ownerPreview }: { creation: Creation; preview: boolean; ownerPreview: boolean }) {
   const sound = useAmbientSound(creation.interaction.sound, creation.interaction.audioSrc);
-  const now = useNow(30_000);
   const p = usePalette(creation);
   const dark = isDark(creation);
-  const scheduledLock = !preview && creation.status === "scheduled" && creation.scheduledFor && now !== null && new Date(creation.scheduledFor).getTime() > now;
+  const viewId = useRef<string | null>(null);
+  const user = useUser();
+  const signedIn = !!user;
+
+  useEffect(() => {
+    if (!preview && signedIn) receivedService.markOpened(creation.slug).catch(() => {});
+  }, [creation.slug, preview, signedIn]);
+
+  // Count the open (not for previews).
+  useEffect(() => {
+    if (preview) return;
+    publicCardService.recordView(creation.slug).then((id) => (viewId.current = id)).catch(() => {});
+    track("recipient_opened", { experience: creation.experience, mode: creation.interaction.mode });
+  }, [creation.slug, creation.experience, creation.interaction.mode, preview]);
+
+  const onCompleted = () => {
+    if (preview) return;
+    track("interaction_completed", { experience: creation.experience, mode: creation.interaction.mode });
+    if (viewId.current) publicCardService.completeView(viewId.current, { mode: creation.interaction.mode, completed: true }).catch(() => {});
+  };
 
   return (
     <div className="fixed inset-0 overflow-hidden" style={{ background: p.bg }}>
       {preview && (
         <div className="absolute inset-x-0 top-0 z-50 flex items-center justify-center gap-3 bg-ink/85 px-4 py-2 text-[12.5px] text-ivory backdrop-blur">
-          <span>Preview — this is exactly what they&apos;ll see.</span>
-          {!sampleSlugs.includes(creation.slug) && (
+          <span>Preview — this is exactly what they&apos;ll see.{ownerPreview && creation.status !== "published" ? " (Not published yet.)" : ""}</span>
+          {ownerPreview && (
             <Link href={`/editor/${creation.id}`} className="inline-flex items-center gap-1 underline underline-offset-4">
               <ArrowLeft className="size-3" /> Back to editing
             </Link>
@@ -79,23 +124,80 @@ function Ready({ creation, preview }: { creation: Creation; preview: boolean }) 
         </button>
       )}
       <div className="absolute inset-0" style={{ top: preview ? 36 : 0 }}>
-        {scheduledLock ? (
-          <StageBackground creation={creation}>
-            <div className="px-6 text-center" style={{ color: dark ? p.paper : p.ink }}>
-              <Clock className="mx-auto mb-4 size-7" style={{ color: p.accent }} />
-              <p className="eyebrow mb-2" style={{ color: dark ? p.accent2 : p.deep }}>
-                Something is on its way
-              </p>
-              <h1 className="font-display text-[clamp(32px,7vw,52px)] leading-none">
-                Arrives {formatDate(creation.scheduledFor, { weekday: "long", day: "numeric", month: "long" })}
-              </h1>
-              <p className="mt-3 opacity-75">From {creation.senderName}. Come back then — it&apos;ll be worth it.</p>
-            </div>
-          </StageBackground>
-        ) : (
-          <ExperiencePlayer creation={creation} preview={preview} finale={(replay) => <ReactionPanelLazy creation={creation} replay={replay} preview={preview} />} />
-        )}
+        <ExperiencePlayer
+          creation={creation}
+          preview={preview}
+          finale={(replay) => <ReactionPanelLazy creation={creation} replay={replay} preview={preview} onShown={onCompleted} />}
+        />
       </div>
+    </div>
+  );
+}
+
+function Waiting({ scheduledAt, senderName, palette }: { scheduledAt: string; senderName: string; palette: Creation["palette"] }) {
+  const p = palettes[palette] ?? palettes["rose-cream"];
+  const now = useNow(1000);
+  const ms = now === null ? 0 : Math.max(0, new Date(scheduledAt).getTime() - now);
+  useEffect(() => {
+    if (now !== null && ms === 0) window.location.reload();
+  }, [ms, now]);
+  return (
+    <div className="fixed inset-0 grid place-items-center px-6 text-center" style={{ background: p.bg, color: p.ink }}>
+      <div>
+        <Clock className="mx-auto mb-4 size-7" style={{ color: p.accent }} />
+        <p className="eyebrow mb-2" style={{ color: p.deep }}>
+          Something is on its way from {senderName || "someone special"}
+        </p>
+        <h1 className="font-display text-[clamp(32px,7vw,52px)] leading-none">
+          Arrives {formatDate(scheduledAt, { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit" })}
+        </h1>
+        {now !== null && ms > 0 && ms < 86400000 && (
+          <p className="mt-4 font-display text-3xl tabular-nums">
+            {String(Math.floor(ms / 3600000)).padStart(2, "0")}:{String(Math.floor((ms / 60000) % 60)).padStart(2, "0")}:{String(Math.floor((ms / 1000) % 60)).padStart(2, "0")}
+          </p>
+        )}
+        <p className="mt-3 opacity-75">Come back then — it&apos;ll be worth it.</p>
+      </div>
+    </div>
+  );
+}
+
+function Locked({ senderName, palette, wrongPassword, onSubmit }: { senderName: string; palette: Creation["palette"]; wrongPassword: boolean; onSubmit: (pw: string) => void }) {
+  const p = palettes[palette] ?? palettes["rose-cream"];
+  const [value, setValue] = useState("");
+  return (
+    <div className="fixed inset-0 grid place-items-center px-6" style={{ background: p.bg, color: p.ink }}>
+      <form
+        className="w-full max-w-sm text-center"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value.trim()) onSubmit(value);
+        }}
+      >
+        <Lock className="mx-auto mb-4 size-7" style={{ color: p.deep }} />
+        <h1 className="font-display text-4xl leading-tight">A private card from {senderName || "someone special"}</h1>
+        <p className="mt-2 text-[15px] opacity-75">Enter the password they shared with you.</p>
+        <label htmlFor="card-password" className="sr-only">
+          Password
+        </label>
+        <input
+          id="card-password"
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+          className="mt-6 h-12 w-full rounded-full border border-ink/15 bg-white/80 px-5 text-center text-[16px] focus:outline-none focus:ring-2"
+          aria-invalid={wrongPassword}
+        />
+        {wrongPassword && (
+          <p role="alert" className="mt-2 text-[14px] text-rose-deep">
+            That password isn&apos;t right.
+          </p>
+        )}
+        <Button type="submit" className="mt-4 w-full" size="lg">
+          Open
+        </Button>
+      </form>
     </div>
   );
 }
@@ -116,14 +218,14 @@ export function CardLoading({ label = "Preparing your surprise…" }: { label?: 
   );
 }
 
-function CardMissing() {
+function CardMissing({ title = "This card couldn't be found", body }: { title?: string; body?: string }) {
   return (
     <div className="fixed inset-0 grid place-items-center bg-ivory px-6">
       <div className="max-w-md text-center">
         <MailQuestion className="mx-auto mb-5 size-8 text-muted" />
-        <h1 className="font-display text-4xl leading-tight">This card couldn&apos;t be found</h1>
+        <h1 className="font-display text-4xl leading-tight">{title}</h1>
         <p className="mt-3 text-[15px] leading-relaxed text-muted">
-          The link may be incomplete, or the sender may have removed it. If someone sent this to you, ask them to share the link again.
+          {body ?? "The link may be incomplete, or the sender may have removed it. If someone sent this to you, ask them to share the link again."}
         </p>
         <div className="mt-8 flex flex-col justify-center gap-2 sm:flex-row">
           <Button asChild>

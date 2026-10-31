@@ -173,6 +173,13 @@ export const occasions: Occasion[] = [
 
 export const occasionMap = Object.fromEntries(occasions.map((o) => [o.slug, o])) as Record<OccasionSlug, Occasion>;
 
+/** Replaces the built-in occasions with the active ones from the database (see hydrateTemplates). */
+export function hydrateOccasions(list: Occasion[]) {
+  if (!list.length) return;
+  occasions.splice(0, occasions.length, ...list);
+  for (const o of list) occasionMap[o.slug] = o;
+}
+
 export function getOccasion(slug: string): Occasion | undefined {
   return occasionMap[slug as OccasionSlug];
 }

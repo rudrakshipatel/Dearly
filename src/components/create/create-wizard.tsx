@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Crown, Eye, Maximize2, PartyPopper, PenTool, Sparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Crown, Eye, Maximize2, PartyPopper, PenTool, Sparkles, Users, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -13,8 +13,10 @@ import { createExperienceOptions } from "@/lib/data/experiences";
 import { occasionInSentence, occasionMap, occasions } from "@/lib/data/occasions";
 import { palettes } from "@/lib/data/palettes";
 import { getTemplate } from "@/lib/data/templates";
-import { creationService, togetherService } from "@/lib/services";
-import { StorageFullError } from "@/lib/services/storage";
+import { track } from "@/lib/analytics";
+import { useSession } from "@/lib/hooks";
+import { ApiClientError, creationService } from "@/lib/services";
+import { formatInZone, timezones, userTimezone, zonedLocalToUtc } from "@/lib/time";
 import type { Creation, ExperienceKind, InteractionSettings, Motif, PaletteId, Template } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { MotifArt } from "../art/motif";
@@ -27,6 +29,7 @@ import { Button } from "../ui/button";
 import { Field, Input, Select, Switch, Textarea } from "../ui/form";
 import { Badge, Skeleton } from "../ui/misc";
 import { useToast } from "../ui/toast";
+import { AiAssistDialog } from "../ai/ai-assist";
 import { InteractionControls } from "./interaction-controls";
 import { PhotoUploader } from "./photo-uploader";
 import { SharePanel } from "./share-panel";
@@ -69,16 +72,35 @@ export function CreateWizard() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  /** Saves the current draft as a creation so it can be edited, previewed full-screen or published. */
-  const persist = async (): Promise<Creation | null> => {
+  const session = useSession();
+
+  /**
+   * Saves the draft to the user's account so it can be edited, previewed or published.
+   * Guests are sent to sign in first; the draft stays in this tab and is restored afterwards.
+   */
+  const persist = async (extra: Partial<Creation> = {}): Promise<Creation | null> => {
     const c = draftToCreation(draft);
     if (!c) return null;
+    if (!session.user) {
+      toast.info({ title: "Sign in to save your card", description: "Your draft is kept — you'll come straight back here." });
+      router.push("/sign-in?next=/create");
+      return null;
+    }
     try {
-      const saved = await creationService.save(c);
+      const body = { ...c, ...extra };
+      let saved: Creation;
+      if (draft.creationId) {
+        // The wizard is the source of truth for its own draft: save on top of the latest version.
+        const current = await creationService.get(draft.creationId).catch(() => null);
+        saved = current ? await creationService.save({ ...body, id: draft.creationId }, current.version ?? 1) : await creationService.create(body);
+      } else {
+        saved = await creationService.create(body);
+      }
       update({ creationId: saved.id, slug: saved.slug });
+      track("card_saved", { source: "wizard", experience: saved.experience });
       return saved;
     } catch (e) {
-      toast.error({ title: "Couldn't save your card", description: e instanceof StorageFullError ? e.message : "Please try again." });
+      toast.error({ title: "Couldn't save your card", description: e instanceof Error ? e.message : "Please try again." });
       return null;
     }
   };
@@ -109,11 +131,11 @@ export function CreateWizard() {
             variant="ghost"
             size="sm"
             onClick={async () => {
-              if (draft.templateId && draft.recipientName) {
-                await persist();
+              if (draft.templateId && draft.recipientName && session.user) {
+                if (!(await persist())) return;
                 toast.success({ title: "Draft saved", description: "Find it any time in My Creations." });
               }
-              router.push("/dashboard");
+              router.push(session.user ? "/dashboard" : "/");
             }}
           >
             <X /> Save & exit
@@ -146,9 +168,22 @@ export function CreateWizard() {
             ) : step === 0 ? (
               <StepOccasion draft={draft} onPick={(occasion) => update({ occasion, templateId: undefined, step: 1 })} />
             ) : step === 1 ? (
-              <StepExperience draft={draft} onPick={(experience) => update({ experience, templateId: undefined, interaction: {}, step: 2 })} />
+              <StepExperience
+                draft={draft}
+                onPick={(experience) => {
+                  track("card_creation_started", { experience });
+                  if (experience === "together") track("group_card_created");
+                  update({ experience, templateId: undefined, interaction: {}, step: 2 });
+                }}
+              />
             ) : step === 2 ? (
-              <StepTemplate draft={draft} onPick={(t) => update({ templateId: t.id, interaction: { mode: t.interactions[0] }, step: 3 })} />
+              <StepTemplate
+                draft={draft}
+                onPick={(t) => {
+                  track("template_selected", { template: t.id, premium: t.premium });
+                  update({ templateId: t.id, interaction: { mode: t.interactions[0] }, step: 3 });
+                }}
+              />
             ) : step === 3 ? (
               <StepPersonalize
                 draft={draft}
@@ -158,7 +193,7 @@ export function CreateWizard() {
                 onPhotos={(photos) => update({ photos })}
               />
             ) : step === 4 ? (
-              <StepInteraction draft={draft} settings={settings} onChange={(patch) => update({ interaction: { ...draft.interaction, ...patch } })} />
+              <StepInteraction draft={draft} settings={settings} cardId={draft.creationId} onChange={(patch) => update({ interaction: { ...draft.interaction, ...patch } })} />
             ) : step === 5 ? (
               <StepPreview
                 draft={draft}
@@ -168,26 +203,53 @@ export function CreateWizard() {
                 }}
                 onFullscreen={async () => {
                   const c = await persist();
-                  if (c) window.open(`/card/${c.slug}?preview=1`, "_blank", "noopener");
+                  if (c) window.open(`/card/${c.slug}?preview=${c.id}`, "_blank", "noopener");
                 }}
               />
             ) : (
               <StepPublish
                 draft={draft}
                 onBack={() => go(5)}
+                signedIn={!!session.user}
+                onCollect={async (opts) => {
+                  const c = await persist({ title: opts.title || undefined });
+                  if (!c) return null;
+                  try {
+                    await creationService.updateSettings(c.id, { contributionDeadline: opts.deadline, contributionLimit: opts.limit, contributionsRequireApproval: opts.requireApproval });
+                    const token = c.contributionToken ?? (await creationService.regenerateToken(c.id));
+                    if (opts.invites.length) {
+                      const r = await creationService.invite(c.id, opts.invites).catch((e) => {
+                        toast.error({ title: "Invitations weren't emailed", description: e instanceof Error ? e.message : undefined });
+                        return null;
+                      });
+                      if (r) toast.success(`Invitations sent to ${r.sent} ${r.sent === 1 ? "person" : "people"}.`);
+                    }
+                    return token;
+                  } catch (e) {
+                    toast.error({ title: "Couldn't create the contributor link", description: e instanceof Error ? e.message : undefined });
+                    return null;
+                  }
+                }}
                 onPublish={async (opts) => {
-                  const c = await persist();
+                  const c = await persist({ title: opts.title || undefined });
                   if (!c) return;
                   try {
-                    const saved = await creationService.save({ ...c, title: opts.title || c.title, showBranding: opts.branding });
-                    const done = await creationService.publish(saved.id, opts.scheduledFor);
-                    if (opts.invites.length) await togetherService.invite(done.slug, opts.invites);
-                    setPublished(done);
+                    const settings: Parameters<typeof creationService.updateSettings>[1] = { showBranding: opts.branding, allowReactions: opts.allowReactions };
+                    if (draft.experience === "together") Object.assign(settings, { contributionDeadline: opts.deadline, contributionLimit: opts.limit, contributionsRequireApproval: opts.requireApproval });
+                    await creationService.updateSettings(c.id, settings);
+                    const res = await creationService.publish(c.id, { scheduledAt: opts.scheduledAt ?? null, timezone: opts.timezone, deliveryEmail: opts.deliveryEmail || null });
+                    if (res.delivery && !res.delivery.queued) toast.info({ title: "Delivery saved", description: res.delivery.reason });
+                    setPublished(res.card);
                     try {
                       sessionStorage.removeItem("dearly:create-draft");
                     } catch {}
                   } catch (e) {
-                    toast.error({ title: "Publishing failed", description: e instanceof Error ? e.message : "Please try again." });
+                    const upgrade = e instanceof ApiClientError && e.isEntitlement;
+                    toast.error({
+                      title: upgrade ? "That needs an upgrade" : "Publishing failed",
+                      description: e instanceof Error ? e.message : "Please try again.",
+                      action: upgrade ? { label: "See plans", onClick: () => router.push("/pricing") } : undefined,
+                    });
                   }
                 }}
               />
@@ -311,6 +373,7 @@ function StepExperience({ draft, onPick }: { draft: CreateDraft; onPick: (e: Exp
 function StepTemplate({ draft, onPick }: { draft: CreateDraft; onPick: (t: Template) => void }) {
   const { exact, others } = templatesFor(draft);
   const [preview, setPreview] = useState<Template | null>(null);
+  const [ideas, setIdeas] = useState(false);
   const grid = (list: Template[]) => (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
       {list.map((t) => {
@@ -338,6 +401,19 @@ function StepTemplate({ draft, onPick }: { draft: CreateDraft; onPick: (t: Templ
   return (
     <>
       <StepTitle eyebrow="Step 3" title={<>Pick a <em>starting point.</em></>} description="Everything — words, photos, colours, the way it opens — can be changed after." />
+      <Button variant="soft" size="sm" className="-mt-4 mb-6" onClick={() => setIdeas(true)}>
+        <Sparkles /> Describe your idea instead
+      </Button>
+      <AiAssistDialog
+        open={ideas}
+        onOpenChange={setIdeas}
+        mode="design"
+        context={{ occasion: draft.occasion }}
+        onUseDesign={(d) => {
+          const t = getTemplate(d.templateId);
+          if (t) onPick(t);
+        }}
+      />
       {exact.length > 0 ? grid(exact) : <p className="mb-6 rounded-2xl bg-blush/60 px-4 py-3 text-[14px] text-burgundy">No exact match for this occasion yet — these work beautifully too.</p>}
       {others.length > 0 && (
         <>
@@ -394,6 +470,7 @@ function StepPersonalize({
   const message = watch("message") ?? "";
   const recipient = watch("recipientName");
   const memories = draft.experience === "memories";
+  const [assist, setAssist] = useState<"write" | "story" | null>(null);
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} noValidate>
@@ -420,6 +497,23 @@ function StepPersonalize({
               </div>
               <span className={cn("text-[12px] tabular-nums", message.length > 1200 ? "text-rose-deep" : "text-muted")}>{message.length}/1200</span>
             </div>
+            <div className="mt-2 flex gap-2">
+              <Button type="button" variant="soft" size="sm" onClick={() => setAssist("write")}>
+                <Sparkles /> Help me write
+              </Button>
+              {memories && (
+                <Button type="button" variant="ghost" size="sm" onClick={() => setAssist("story")}>
+                  Turn memories into a story
+                </Button>
+              )}
+            </div>
+            <AiAssistDialog
+              open={!!assist}
+              onOpenChange={(v) => !v && setAssist(null)}
+              mode={assist ?? "write"}
+              context={{ occasion: occasion.name, recipient: recipient || draft.recipientName, relationship: watch("relationship"), draft: message || undefined }}
+              onUseText={(text) => setValue("message", text.slice(0, 1200), { shouldValidate: true })}
+            />
           </Field>
           <div className="grid gap-5 sm:grid-cols-2">
             <Field label="Occasion date (optional)" htmlFor="occasionDate">
@@ -436,7 +530,7 @@ function StepPersonalize({
           </div>
           <div>
             <p className="mb-1.5 text-[13px] font-medium text-ink/80">Photos {template.photoSlots ? `(this template has ${template.photoSlots} spots)` : "(optional)"}</p>
-            <PhotoUploader photos={draft.photos} onChange={onPhotos} withDetails={memories} max={memories ? 12 : 6} />
+            <PhotoUploader photos={draft.photos} onChange={onPhotos} withDetails={memories} max={memories ? 12 : 6} cardId={draft.creationId ?? null} />
           </div>
         </div>
         <aside className="hidden lg:block">
@@ -464,15 +558,15 @@ function StepPersonalize({
 
 /* ------------------------------------------------------------ Step 5 */
 
-function StepInteraction({ draft, settings, onChange }: { draft: CreateDraft; settings: InteractionSettings; onChange: (p: Partial<InteractionSettings>) => void }) {
+function StepInteraction({ draft, settings, onChange, cardId }: { draft: CreateDraft; settings: InteractionSettings; onChange: (p: Partial<InteractionSettings>) => void; cardId?: string }) {
   const exp = draft.experience ?? "surprise";
   return (
     <>
       <StepTitle eyebrow="Step 5" title={<>Choose the <em>moment</em> they open it.</>} description="Every choice here shows up in the preview next." />
-      <InteractionControls experience={exp} settings={settings} onChange={onChange} />
+      <InteractionControls experience={exp} settings={settings} onChange={onChange} cardId={cardId ?? null} />
       {exp === "together" && (
         <p className="mt-6 rounded-2xl border border-line bg-paper p-5 text-[14px] leading-relaxed text-muted">
-          After publishing you&apos;ll get a contributor link to share. Everyone you invite can add a message, photo or video before it&apos;s delivered.
+          On the last step you&apos;ll get a contributor link to share. Everyone you invite can add a message, photo or video — you review them before the card is delivered.
         </p>
       )}
     </>
@@ -521,37 +615,90 @@ function StepPreview({ draft, onEditor, onFullscreen }: { draft: CreateDraft; on
 
 /* ------------------------------------------------------------ Step 7 */
 
+interface PublishOpts {
+  title: string;
+  scheduledAt?: string;
+  timezone: string;
+  deliveryEmail: string;
+  branding: boolean;
+  allowReactions: boolean;
+  deadline: string | null;
+  limit: number | null;
+  requireApproval: boolean;
+}
+
 function StepPublish({
   draft,
   onBack,
   onPublish,
+  onCollect,
+  signedIn,
 }: {
   draft: CreateDraft;
   onBack: () => void;
-  onPublish: (o: { title: string; scheduledFor?: string; branding: boolean; invites: string[] }) => Promise<void>;
+  onPublish: (o: PublishOpts) => Promise<void>;
+  onCollect: (o: PublishOpts & { invites: string[] }) => Promise<string | null>;
+  signedIn: boolean;
 }) {
   const t = getTemplate(draft.templateId)!;
   const [title, setTitle] = useState(`${t.name} for ${draft.recipientName}`);
   const [when, setWhen] = useState<"now" | "later">("now");
   const [date, setDate] = useState("");
+  const [tz, setTz] = useState(userTimezone);
+  const [email, setEmail] = useState("");
   const [branding, setBranding] = useState(true);
+  const [allowReactions, setAllowReactions] = useState(true);
+  const [deadline, setDeadline] = useState("");
+  const [limit, setLimit] = useState("");
+  const [requireApproval, setRequireApproval] = useState(true);
   const [invites, setInvites] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"publish" | "collect" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const together = draft.experience === "together";
+  const zones = useMemo(() => timezones(), []);
 
-  const submit = async () => {
+  const collect = (): PublishOpts | null => {
     setError(null);
+    let scheduledAt: string | undefined;
     if (when === "later") {
-      if (!date) return setError("Choose when it should be delivered.");
-      if (new Date(date).getTime() < Date.now()) return setError("That time has already passed.");
+      if (!date) return setError("Choose when it should be delivered."), null;
+      scheduledAt = zonedLocalToUtc(date, tz);
+      if (new Date(scheduledAt).getTime() < Date.now() + 60_000) return setError("Choose a time at least a minute from now."), null;
     }
+    if (email && !z.string().email().safeParse(email).success) return setError("That recipient email doesn't look right."), null;
+    const lim = limit ? Number(limit) : null;
+    if (lim !== null && (!Number.isInteger(lim) || lim < 1 || lim > 1000)) return setError("Contributor limit must be between 1 and 1000."), null;
+    return {
+      title,
+      scheduledAt,
+      timezone: tz,
+      deliveryEmail: email.trim(),
+      branding,
+      allowReactions,
+      deadline: deadline ? zonedLocalToUtc(deadline, tz) : null,
+      limit: lim,
+      requireApproval,
+    };
+  };
+
+  const publish = async () => {
+    const o = collect();
+    if (!o) return;
+    setBusy("publish");
+    await onPublish(o);
+    setBusy(null);
+  };
+
+  const getLink = async () => {
+    const o = collect();
+    if (!o) return;
     const emails = invites.split(/[\s,;]+/).filter(Boolean);
     const bad = emails.find((e) => !z.string().email().safeParse(e).success);
     if (bad) return setError(`"${bad}" doesn't look like an email address.`);
-    setBusy(true);
-    await onPublish({ title, scheduledFor: when === "later" ? new Date(date).toISOString() : undefined, branding, invites: emails });
-    setBusy(false);
+    setBusy("collect");
+    setToken(await onCollect({ ...o, invites: emails }));
+    setBusy(null);
   };
 
   return (
@@ -559,16 +706,53 @@ function StepPublish({
       <StepTitle eyebrow="Step 7" title={<>Ready to make someone&apos;s <em>day?</em></>} />
       <div className="grid gap-10 lg:grid-cols-[1.3fr_1fr]">
         <div className="space-y-6">
+          {!signedIn && (
+            <p className="rounded-2xl border border-line bg-blush/50 px-4 py-3 text-[14px] text-burgundy">
+              You&apos;ll be asked to sign in or create a free account to save and share — your card is kept while you do.
+            </p>
+          )}
           <Field label="Title (only you see this)" htmlFor="title">
             <Input id="title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} />
           </Field>
+
+          {together && (
+            <fieldset className="space-y-4 rounded-2xl border border-line bg-paper p-5">
+              <legend className="px-1 text-[13px] font-medium">1 · Collect messages</legend>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Deadline (optional)" htmlFor="deadline">
+                  <Input id="deadline" type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+                </Field>
+                <Field label="Contributor limit (optional)" htmlFor="limit">
+                  <Input id="limit" type="number" min={1} max={1000} value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="Your plan's limit" />
+                </Field>
+              </div>
+              <label className="flex items-center justify-between gap-4 text-[14px]">
+                <span>
+                  Review messages before they appear
+                  <span className="block text-[12.5px] text-muted">Recommended — you approve or reject each one.</span>
+                </span>
+                <Switch checked={requireApproval} onChange={setRequireApproval} label="Review messages before they appear" />
+              </label>
+              <Field label="Email the invitation to (optional)" htmlFor="invites" hint="Separate emails with commas. You can also share the link anywhere.">
+                <Textarea id="invites" value={invites} onChange={(e) => setInvites(e.target.value)} className="min-h-16" placeholder="sam@example.com, priya@example.com" />
+              </Field>
+              {token ? (
+                <SharePanel path={`/together/${token}`} label="Contributor link — share it with everyone" />
+              ) : (
+                <Button variant="outline" onClick={getLink} loading={busy === "collect"}>
+                  <Users /> Get contributor link
+                </Button>
+              )}
+            </fieldset>
+          )}
+
           <div>
-            <p className="mb-1.5 text-[13px] font-medium text-ink/80">Delivery</p>
+            <p className="mb-1.5 text-[13px] font-medium text-ink/80">{together ? "2 · Deliver to the recipient" : "Delivery"}</p>
             <div className="grid gap-2 sm:grid-cols-2">
               {(
                 [
                   ["now", "Get the link now", "Share it however you like, whenever you like."],
-                  ["later", "Schedule it", "We'll unlock it at the exact moment you choose."],
+                  ["later", "Schedule it", "We'll unlock it — and email it if you like — at the exact moment you choose."],
                 ] as const
               ).map(([v, l, d]) => (
                 <button key={v} type="button" aria-pressed={when === v} onClick={() => setWhen(v)} className={cn("rounded-2xl border p-4 text-left", when === v ? "border-burgundy bg-blush/60" : "border-line bg-paper")}>
@@ -579,21 +763,41 @@ function StepPublish({
                 </button>
               ))}
             </div>
-            {when === "later" && <Input type="datetime-local" aria-label="Delivery date and time" value={date} onChange={(e) => setDate(e.target.value)} className="mt-3 sm:w-72" />}
+            {when === "later" && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <Input type="datetime-local" aria-label="Delivery date and time" value={date} onChange={(e) => setDate(e.target.value)} />
+                <Select aria-label="Timezone" value={tz} onChange={(e) => setTz(e.target.value)}>
+                  {zones.map((z) => (
+                    <option key={z} value={z}>
+                      {z.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </Select>
+                {date && <p className="text-[12.5px] text-muted sm:col-span-2">Arrives {formatInZone(zonedLocalToUtc(date, tz), tz)}.</p>}
+              </div>
+            )}
           </div>
-          {together && (
-            <Field label="Invite contributors (optional)" htmlFor="invites" hint="Separate emails with commas. You'll also get a link to share anywhere.">
-              <Textarea id="invites" value={invites} onChange={(e) => setInvites(e.target.value)} className="min-h-20" placeholder="sam@example.com, priya@example.com" />
-            </Field>
-          )}
-          <div className="flex items-start justify-between gap-4 rounded-2xl border border-line bg-paper p-4">
-            <div>
-              <p className="flex items-center gap-2 text-[14px] font-medium">
-                Show &ldquo;Made with Dearly&rdquo; <Badge tone="premium">Premium to remove</Badge>
-              </p>
-              <p className="text-[12.5px] text-muted">A small signature at the end of the experience.</p>
-            </div>
-            <Switch checked={branding} onChange={setBranding} label="Show Dearly branding" />
+          <Field label="Recipient's email (optional)" htmlFor="remail" hint={when === "later" ? "We'll email them the link at delivery time." : "We'll email them the link right away."}>
+            <Input id="remail" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="maya@example.com" autoComplete="off" />
+          </Field>
+
+          <div className="space-y-3 rounded-2xl border border-line bg-paper p-4">
+            <label className="flex items-start justify-between gap-4">
+              <span>
+                <span className="flex items-center gap-2 text-[14px] font-medium">
+                  Show &ldquo;Made with Dearly&rdquo; <Badge tone="premium">Premium to remove</Badge>
+                </span>
+                <span className="text-[12.5px] text-muted">A small signature at the end of the experience.</span>
+              </span>
+              <Switch checked={branding} onChange={setBranding} label="Show Dearly branding" />
+            </label>
+            <label className="flex items-start justify-between gap-4">
+              <span>
+                <span className="text-[14px] font-medium">Let them reply</span>
+                <span className="block text-[12.5px] text-muted">Reactions and a short thank-you note at the end.</span>
+              </span>
+              <Switch checked={allowReactions} onChange={setAllowReactions} label="Allow reactions" />
+            </label>
           </div>
           {error && (
             <p role="alert" className="rounded-xl bg-blush px-4 py-3 text-[14px] text-rose-deep">
@@ -604,8 +808,8 @@ function StepPublish({
             <Button variant="ghost" size="lg" onClick={onBack}>
               <ArrowLeft /> Back to preview
             </Button>
-            <Button size="lg" onClick={submit} loading={busy} className="sm:ml-auto">
-              {when === "later" ? "Schedule delivery" : "Publish & get link"} {!busy && <PartyPopper />}
+            <Button size="lg" onClick={publish} loading={busy === "publish"} className="sm:ml-auto">
+              {when === "later" ? "Schedule delivery" : together ? "Deliver now" : "Publish & get link"} {busy !== "publish" && <PartyPopper />}
             </Button>
           </div>
         </div>
@@ -634,11 +838,11 @@ function Published({ creation, onNew }: { creation: Creation; onNew: () => void 
       </p>
       <div className="mt-10 space-y-6 rounded-[22px] border border-line bg-paper p-6 text-left">
         <SharePanel path={`/card/${creation.slug}`} recipient={creation.recipientName} />
-        {together && <SharePanel path={`/together/${creation.slug}`} label="Contributor link — ask everyone to sign" />}
+        {together && creation.contributionToken && <SharePanel path={`/together/${creation.contributionToken}`} label="Contributor link — ask everyone to sign" />}
       </div>
       <div className="mt-8 flex flex-col justify-center gap-2 sm:flex-row">
         <Button asChild variant="outline">
-          <Link href={`/card/${creation.slug}?preview=1`} target="_blank">
+          <Link href={`/card/${creation.slug}?preview=${creation.id}`} target="_blank">
             <Eye /> Open it
           </Link>
         </Button>

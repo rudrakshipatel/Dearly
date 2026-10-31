@@ -64,10 +64,12 @@ export function InteractionControls({
   experience,
   settings,
   onChange,
+  cardId,
 }: {
   experience: ExperienceKind;
   settings: S;
   onChange: (patch: Partial<S>) => void;
+  cardId?: string | null;
 }) {
   const toast = useToast();
   const videoInput = useRef<HTMLInputElement>(null);
@@ -80,8 +82,8 @@ export function InteractionControls({
   const uploadMedia = async (file: File, kind: "video" | "audio") => {
     setUploading(kind);
     try {
-      const ref = await uploadService.uploadMedia(file);
-      onChange(kind === "video" ? { videoSrc: ref } : { audioSrc: ref, sound: "custom" });
+      const { src } = await uploadService.upload(file, { cardId });
+      onChange(kind === "video" ? { videoSrc: src } : { audioSrc: src, sound: "custom" });
       toast.success(kind === "video" ? "Video added." : "Audio added.");
     } catch (e) {
       toast.error({ title: "Upload failed", description: e instanceof Error ? e.message : undefined });
@@ -276,7 +278,7 @@ export function InteractionControls({
               </Button>
             )}
           </div>
-          <input ref={videoInput} type="file" accept="video/*" capture="user" hidden onChange={(e) => e.target.files?.[0] && uploadMedia(e.target.files[0], "video")} />
+          <input ref={videoInput} type="file" accept="video/mp4,video/webm" capture="user" hidden onChange={(e) => e.target.files?.[0] && uploadMedia(e.target.files[0], "video")} />
         </fieldset>
       )}
 
@@ -310,7 +312,7 @@ export function InteractionControls({
               {uploading === "audio" ? <Loader2 className="size-3.5 animate-spin" /> : settings.sound === "custom" ? <Music className="size-3.5" /> : <Upload className="size-3.5" />}
               {settings.sound === "custom" ? "Your audio" : "Upload audio"}
             </button>
-            <input ref={audioInput} type="file" accept="audio/*" hidden onChange={(e) => e.target.files?.[0] && uploadMedia(e.target.files[0], "audio")} />
+            <input ref={audioInput} type="file" accept="audio/mpeg,audio/mp4,audio/x-m4a,audio/webm,audio/ogg,audio/wav" hidden onChange={(e) => e.target.files?.[0] && uploadMedia(e.target.files[0], "audio")} />
           </div>
           <p className="mt-1.5 text-[12.5px] text-muted">Never auto-plays — they choose to turn it on.</p>
         </div>

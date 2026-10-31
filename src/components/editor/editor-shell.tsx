@@ -28,24 +28,22 @@ import {
   Layers,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMediaQuery } from "@/lib/hooks";
-import { creationService } from "@/lib/services";
-import { StorageFullError } from "@/lib/services/storage";
 import type { Creation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Wordmark } from "../brand/logo";
 import { CardPageView } from "../card/page-view";
-import { SharePanel } from "../create/share-panel";
+import { ManageCardDialog } from "../card/manage-dialog";
 import { ExperiencePlayer } from "../experiences/player";
 import { PhoneFrame } from "../templates/phone-frame";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent } from "../ui/dialog";
-import { useToast } from "../ui/toast";
 import { EditorCanvas } from "./canvas";
 import { panelComponents, type PanelId } from "./panels";
 import { PropertiesPanel } from "./properties";
 import { useEditorStore } from "./store";
+import { useAutosave } from "./use-autosave";
 
 const tabs: { id: PanelId; label: string; icon: typeof Type }[] = [
   { id: "templates", label: "Templates", icon: LayoutTemplate },
@@ -60,37 +58,16 @@ const tabs: { id: PanelId; label: string; icon: typeof Type }[] = [
   { id: "pages", label: "Pages", icon: Layers },
 ];
 
-type SaveState = "saved" | "saving" | "error";
 
 export function EditorShell({ initial }: { initial: Creation }) {
   const { state, doc, current, selectedEl, actions, canUndo, canRedo } = useEditorStore(initial);
   const desktop = useMediaQuery("(min-width: 1024px)");
   const [tab, setTab] = useState<PanelId>("text");
   const [sheet, setSheet] = useState<PanelId | "props" | null>(null);
-  const [save, setSave] = useState<SaveState>("saved");
   const [preview, setPreview] = useState(false);
   const [publish, setPublish] = useState(false);
-  const toast = useToast();
-  const first = useRef(true);
-
-  // Autosave (debounced).
-  useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
-    setSave("saving");
-    const t = setTimeout(async () => {
-      try {
-        await creationService.save(doc);
-        setSave("saved");
-      } catch (e) {
-        setSave("error");
-        if (e instanceof StorageFullError) toast.error(e.message);
-      }
-    }, 700);
-    return () => clearTimeout(t);
-  }, [doc, toast]);
+  const autosave = useAutosave(doc);
+  const save = autosave.status;
 
   // Keyboard shortcuts.
   useEffect(() => {
@@ -135,23 +112,54 @@ export function EditorShell({ initial }: { initial: Creation }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [actions, selectedEl]);
 
-  // Warn before leaving with unsaved changes.
-  useEffect(() => {
-    if (save !== "saving") return;
-    const h = (e: BeforeUnloadEvent) => e.preventDefault();
-    window.addEventListener("beforeunload", h);
-    return () => window.removeEventListener("beforeunload", h);
-  }, [save]);
 
   const panelProps = { doc, page: current, pageIndex: state.page, selectedId: state.selected, actions };
   const Panel = panelComponents[tab];
 
+  const saveLabel = { saved: "All changes saved", pending: "Unsaved changes", saving: "Saving…", retrying: "Offline — retrying", error: "Not saved", conflict: "Changed elsewhere" }[save];
   const saveIndicator = (
-    <span className="flex items-center gap-1.5 text-[12px] text-muted" aria-live="polite">
-      {save === "saving" ? <Loader2 className="size-3.5 animate-spin" /> : save === "saved" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5 text-rose-deep" />}
-      <span className="hidden sm:inline">{save === "saving" ? "Saving…" : save === "saved" ? "All changes saved" : "Not saved"}</span>
+    <span className="flex items-center gap-1.5 text-[12px] text-muted" aria-live="polite" title={autosave.message ?? undefined}>
+      {save === "saving" || save === "pending" ? <Loader2 className={cn("size-3.5", save === "saving" && "animate-spin")} /> : save === "saved" ? <Cloud className="size-3.5" /> : <CloudOff className="size-3.5 text-rose-deep" />}
+      <span className="hidden sm:inline">{saveLabel}</span>
     </span>
   );
+
+  const banner =
+    autosave.restorable ? (
+      <div className="flex flex-wrap items-center justify-center gap-3 bg-ink px-4 py-2 text-[13px] text-ivory" role="status">
+        Unsaved changes from {new Date(autosave.restorable.savedAt).toLocaleString()} were found on this device.
+        <button
+          className="underline underline-offset-4"
+          onClick={() => {
+            const restored = autosave.restorable!.doc;
+            actions.update((d) => ({ ...d, pages: restored.pages, photos: restored.photos, interaction: restored.interaction, title: restored.title, message: restored.message }));
+            autosave.dismissRestore();
+          }}
+        >
+          Restore them
+        </button>
+        <button className="opacity-70 hover:opacity-100" onClick={autosave.dismissRestore}>
+          Discard
+        </button>
+      </div>
+    ) : save === "conflict" ? (
+      <div className="flex flex-wrap items-center justify-center gap-3 bg-rose-deep px-4 py-2 text-[13px] text-white" role="alert">
+        This card was changed in another tab or device.
+        <button className="underline underline-offset-4" onClick={() => autosave.resolveConflict("theirs")}>
+          Load the newer version
+        </button>
+        <button className="underline underline-offset-4" onClick={() => autosave.resolveConflict("mine")}>
+          Keep my version
+        </button>
+      </div>
+    ) : save === "error" ? (
+      <div className="flex flex-wrap items-center justify-center gap-3 bg-rose-deep px-4 py-2 text-[13px] text-white" role="alert">
+        {autosave.message ?? "We couldn't save your latest change."}
+        <button className="underline underline-offset-4" onClick={() => autosave.retryNow()}>
+          Try again
+        </button>
+      </div>
+    ) : null;
 
   const pageNav = (
     <div className="flex items-center justify-center gap-2">
@@ -191,14 +199,25 @@ export function EditorShell({ initial }: { initial: Creation }) {
           )}
           <div className="mt-5 flex justify-center">
             <Button asChild variant="outline" size="sm">
-              <Link href={`/card/${doc.slug}?preview=1`} target="_blank">
+              <Link href={`/card/${doc.slug}?preview=${doc.id}`} target="_blank">
                 Open full screen
               </Link>
             </Button>
           </div>
         </DialogContent>
       </Dialog>
-      <PublishDialog open={publish} onOpenChange={setPublish} doc={doc} onPublished={(c) => actions.update((d) => ({ ...d, status: c.status }), false)} />
+      <ManageCardDialog
+        card={doc}
+        open={publish}
+        onOpenChange={setPublish}
+        beforePublish={autosave.flush}
+        onChanged={(c) =>
+          actions.update(
+            (d) => ({ ...d, status: c.status, scheduledFor: c.scheduledFor, publishedAt: c.publishedAt, showBranding: c.showBranding, allowReactions: c.allowReactions, allowResponsePhoto: c.allowResponsePhoto, isDisabled: c.isDisabled, hasPassword: c.hasPassword, recipientEmail: c.recipientEmail, timezone: c.timezone, contributionToken: c.contributionToken }),
+            false,
+          )
+        }
+      />
     </>
   );
 
@@ -206,6 +225,7 @@ export function EditorShell({ initial }: { initial: Creation }) {
     const SheetPanel = sheet && sheet !== "props" ? panelComponents[sheet] : null;
     return (
       <div className="fixed inset-0 flex flex-col bg-[#F4EEEA]">
+        {banner}
         <header className="flex h-14 items-center justify-between gap-1 border-b border-line bg-paper px-2">
           <Button asChild variant="ghost" size="icon" aria-label="Back to my creations">
             <Link href="/dashboard">
@@ -285,7 +305,8 @@ export function EditorShell({ initial }: { initial: Creation }) {
   }
 
   return (
-    <div className="fixed inset-0 grid grid-rows-[56px_1fr] bg-[#F4EEEA]">
+    <div className={cn("fixed inset-0 grid bg-[#F4EEEA]", banner ? "grid-rows-[auto_56px_1fr]" : "grid-rows-[56px_1fr]")}>
+      {banner}
       {/* Top toolbar */}
       <header className="flex items-center justify-between gap-4 border-b border-line bg-paper px-4">
         <div className="flex min-w-0 items-center gap-3">
@@ -356,54 +377,5 @@ export function EditorShell({ initial }: { initial: Creation }) {
       </div>
       {dialogs}
     </div>
-  );
-}
-
-function PublishDialog({ open, onOpenChange, doc, onPublished }: { open: boolean; onOpenChange: (v: boolean) => void; doc: Creation; onPublished: (c: Creation) => void }) {
-  const [busy, setBusy] = useState(false);
-  const toast = useToast();
-  const published = doc.status === "published" || doc.status === "scheduled";
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={published ? "Share your creation" : "Publish your creation"} description={published ? "Your changes are live as soon as they save." : `Get a private link for ${doc.recipientName || "them"}. No account needed to open it.`}>
-        {published ? (
-          <SharePanel path={`/card/${doc.slug}`} recipient={doc.recipientName} />
-        ) : (
-          <div className="space-y-4">
-            <ul className="space-y-2 text-[14px] text-ink/80">
-              <li className="flex items-center gap-2">
-                <Check className="size-4 text-burgundy" /> {doc.pages.length} {doc.pages.length === 1 ? "page" : "pages"}
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="size-4 text-burgundy" /> Opens with: {doc.interaction.mode.replace("-", " ")}
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="size-4 text-burgundy" /> Sound {doc.interaction.sound === "none" ? "off" : "available on tap"}
-              </li>
-            </ul>
-            <Button
-              className="w-full"
-              size="lg"
-              loading={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await creationService.save(doc);
-                  const c = await creationService.publish(doc.id);
-                  onPublished(c);
-                  toast.success("Published! Your link is ready.");
-                } catch (e) {
-                  toast.error({ title: "Couldn't publish", description: e instanceof Error ? e.message : undefined });
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              <Send /> Publish & get link
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
   );
 }

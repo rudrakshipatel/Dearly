@@ -9,6 +9,7 @@ import {
   Music,
   Play,
   Plus,
+  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import { PhotoView, sceneNames } from "../art/scene";
 import { StickerArt, stickers } from "../art/stickers";
 import { TemplateThumb } from "../art/template-thumb";
 import { CardPageView } from "../card/page-view";
+import { AiAssistDialog } from "../ai/ai-assist";
 import { ColorRow } from "../create/interaction-controls";
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/dialog";
@@ -83,9 +85,24 @@ export function TemplatesPanel({ doc, actions, onDone }: PanelProps) {
 
 export function TextPanel({ doc, actions, onDone }: PanelProps) {
   const color = palettes[doc.palette].ink;
+  const [assist, setAssist] = useState(false);
   return (
     <div>
       <PanelTitle>Add text</PanelTitle>
+      <Button variant="soft" size="sm" className="mb-3 w-full" onClick={() => setAssist(true)}>
+        <Sparkles /> Write with AI
+      </Button>
+      <AiAssistDialog
+        open={assist}
+        onOpenChange={setAssist}
+        mode="write"
+        context={{ occasion: doc.occasion, recipient: doc.recipientName, relationship: doc.relationship }}
+        onUseText={(text) => {
+          const el = newText(textPresets[2], color);
+          actions.addElement({ ...el, text, font: "hand", size: 26, h: 260, y: 200, lineHeight: 1.4 } as typeof el);
+          onDone?.();
+        }}
+      />
       <div className="space-y-2">
         {textPresets.map((p) => (
           <button
@@ -120,37 +137,58 @@ export function TextPanel({ doc, actions, onDone }: PanelProps) {
 
 export function UploadsPanel({ doc, actions, onDone }: PanelProps) {
   const input = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
+  const [jobs, setJobs] = useState<{ id: string; name: string; progress: number; abort: AbortController }[]>([]);
   const toast = useToast();
-  const uploads = doc.photos.filter((p) => !p.src.startsWith("scene:"));
+  const uploads = doc.photos.filter((p) => p.src.startsWith("media:"));
   return (
     <div>
       <PanelTitle>Your uploads</PanelTitle>
-      <Button className="w-full" variant="outline" onClick={() => input.current?.click()} loading={busy}>
-        {!busy && <Upload />} Upload photos
+      <Button className="w-full" variant="outline" onClick={() => input.current?.click()}>
+        <Upload /> Upload photos
       </Button>
+      <p className="mt-2 text-[12px] text-muted">JPG, PNG or WebP up to 10 MB. Photos are compressed and location data is removed.</p>
       <input
         ref={input}
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
         multiple
         hidden
         onChange={async (e) => {
           const files = Array.from(e.target.files ?? []);
-          if (!files.length) return;
-          setBusy(true);
-          for (const f of files) {
-            try {
-              const src = await uploadService.uploadImage(f, 1200);
-              actions.update((d) => ({ ...d, photos: [...d.photos, { id: crypto.randomUUID().slice(0, 8), src, caption: "" }] }), false);
-            } catch (err) {
-              toast.error({ title: "Upload failed", description: err instanceof Error ? err.message : undefined });
-            }
-          }
-          setBusy(false);
           e.target.value = "";
+          await Promise.all(
+            files.map(async (f) => {
+              const job = { id: crypto.randomUUID(), name: f.name, progress: 0, abort: new AbortController() };
+              setJobs((j) => [...j, job]);
+              try {
+                const up = await uploadService.upload(f, { cardId: doc.id, signal: job.abort.signal, onProgress: (progress) => setJobs((j) => j.map((x) => (x.id === job.id ? { ...x, progress } : x))) });
+                actions.update((d) => ({ ...d, photos: [...d.photos, { id: up.mediaId.slice(0, 8), src: up.src, caption: "" }] }), false);
+              } catch (err) {
+                if ((err as Error).name !== "AbortError") toast.error({ title: `Couldn't upload ${f.name}`, description: err instanceof Error ? err.message : undefined });
+              } finally {
+                setJobs((j) => j.filter((x) => x.id !== job.id));
+              }
+            }),
+          );
         }}
       />
+      {jobs.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {jobs.map((j) => (
+            <li key={j.id} className="rounded-xl border border-line px-3 py-2 text-[12.5px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate">{j.name}</span>
+                <button className="text-rose-deep" onClick={() => j.abort.abort()}>
+                  Cancel
+                </button>
+              </div>
+              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-line">
+                <div className="h-full bg-burgundy transition-[width]" style={{ width: `${Math.round(j.progress * 100)}%` }} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
       {uploads.length ? (
         <div className="mt-4 grid grid-cols-2 gap-2">
           {uploads.map((p) => (
@@ -163,15 +201,17 @@ export function UploadsPanel({ doc, actions, onDone }: PanelProps) {
               className="aspect-square overflow-hidden rounded-xl border border-line hover:ring-2 hover:ring-burgundy"
               aria-label="Add this photo to the page"
             >
-              <PhotoView src={p.src} alt="" />
+              <PhotoView src={p.src} alt="" variant="thumb" />
             </button>
           ))}
         </div>
       ) : (
-        <div className="mt-4 rounded-xl border border-dashed border-line px-4 py-8 text-center text-[13px] text-muted">
-          <ImagePlus className="mx-auto mb-2 size-5" />
-          Photos you upload appear here. Click one to place it on the card.
-        </div>
+        jobs.length === 0 && (
+          <div className="mt-4 rounded-xl border border-dashed border-line px-4 py-8 text-center text-[13px] text-muted">
+            <ImagePlus className="mx-auto mb-2 size-5" />
+            Photos you upload appear here. Click one to place it on the card.
+          </div>
+        )
       )}
     </div>
   );
@@ -408,15 +448,15 @@ export function AudioPanel({ doc, actions }: PanelProps) {
         <input
           ref={input}
           type="file"
-          accept="audio/*"
+          accept="audio/mpeg,audio/mp4,audio/x-m4a,audio/webm,audio/ogg,audio/wav"
           hidden
           onChange={async (e) => {
             const f = e.target.files?.[0];
             if (!f) return;
             setBusy(true);
             try {
-              const ref = await uploadService.uploadMedia(f);
-              set({ sound: "custom", audioSrc: ref });
+              const { src } = await uploadService.upload(f, { cardId: doc.id });
+              set({ sound: "custom", audioSrc: src });
               toast.success("Audio added.");
             } catch (err) {
               toast.error({ title: "Upload failed", description: err instanceof Error ? err.message : undefined });

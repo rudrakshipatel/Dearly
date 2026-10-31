@@ -122,25 +122,4 @@ export function Scene({ name, className }: { name: string; className?: string })
   );
 }
 
-/** Renders either an illustrated scene (`scene:name`) or a real image URL. */
-export function PhotoView({
-  src,
-  alt = "",
-  className,
-  style,
-}: {
-  src: string;
-  alt?: string;
-  className?: string;
-  style?: React.CSSProperties;
-}) {
-  if (src.startsWith("scene:")) {
-    return (
-      <div className={cn("size-full overflow-hidden", className)} style={style}>
-        <Scene name={src.slice(6)} />
-      </div>
-    );
-  }
-  // eslint-disable-next-line @next/next/no-img-element -- user uploads are data URLs / blob URLs
-  return <img src={src} alt={alt} className={cn("size-full object-cover", className)} style={style} loading="lazy" decoding="async" draggable={false} />;
-}
+export { PhotoView } from "./photo";
