@@ -29,7 +29,7 @@ Every integration reads its credentials from environment variables (see [`.env.e
 
 1. Import the repository, framework preset Next.js.
 2. Add every variable from `.env.example` (Production and Preview).
-3. Deploy. `vercel.json` registers two cron jobs (`/api/cron/deliveries` every 5 minutes, `/api/cron/cleanup` daily) authenticated with `CRON_SECRET`. Five-minute crons need a paid Vercel plan; on Hobby rely on Inngest (below) or change the schedule.
+3. Deploy. `vercel.json` registers two daily cron jobs (`/api/cron/deliveries` at 08:00 UTC, `/api/cron/cleanup` at 03:30 UTC) authenticated with `CRON_SECRET` — Vercel Hobby allows at most daily crons. On a paid plan you can run deliveries every 5 minutes (`*/5 * * * *`); either way Inngest (below) delivers on time and the cron is only a safety net.
 
 ## 3. Background jobs (Inngest)
 
